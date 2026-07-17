@@ -2,7 +2,8 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import type { BuiltWorkout, Exercise, SetPerformance, WorkoutExercise } from "@/types/training";
+import type { BuiltWorkout, Exercise, SaveWorkoutPayload, SetPerformance, WorkoutExercise } from "@/types/training";
+import { cacheWorkout, getCachedWorkout, queueWorkout } from "@/lib/offline";
 
 type EditableExercise = WorkoutExercise & { sets: SetPerformance[]; rpe: string; notes: string };
 type Summary = { sessionId: string; totalSets: number; totalVolume: number; prs: string[] };
@@ -37,6 +38,8 @@ function WorkoutContent() {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [offlineLoaded, setOfflineLoaded] = useState(false);
+  const [queuedOffline, setQueuedOffline] = useState(false);
   const [replaceIndex, setReplaceIndex] = useState<number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [rest, setRest] = useState(0);
@@ -66,10 +69,19 @@ function WorkoutContent() {
         const response = await fetch(`/api/workouts?type=${encodeURIComponent(workoutType)}&variant=${encodeURIComponent(variant)}`);
         const json = await response.json();
         if (!response.ok) throw new Error(json.error || "Unable to load workout");
+        cacheWorkout(workoutType, variant, json);
         setData(json);
+        setOfflineLoaded(false);
         setItems(json.exercises.map((item: WorkoutExercise) => ({ ...item, sets: item.target.map((set) => ({ ...set })), rpe: "", notes: "" })));
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to load workout");
+        const cached = getCachedWorkout(workoutType, variant);
+        if (cached) {
+          setData(cached);
+          setOfflineLoaded(true);
+          setItems(cached.exercises.map((item: WorkoutExercise) => ({ ...item, sets: item.target.map((set) => ({ ...set })), rpe: "", notes: "" })));
+        } else {
+          setError(err instanceof Error ? `${err.message}. Open this workout once while online to make it available offline.` : "Unable to load workout");
+        }
       } finally { setLoading(false); }
     }
     load();
@@ -109,7 +121,7 @@ function WorkoutContent() {
   }
 
   async function saveWorkout() {
-    setSaving(true); setError("");
+    setSaving(true); setError(""); setQueuedOffline(false);
     try {
       const prs = items.filter((item) => {
         if (!item.last) return false;
@@ -119,7 +131,7 @@ function WorkoutContent() {
       }).map((x) => x.exercise.exerciseName);
       const totalSets = items.reduce((sum, x) => sum + x.sets.filter((s) => s.kg || s.value !== null).length, 0);
       const totalVolume = items.reduce((sum, x) => sum + x.sets.reduce((s, set) => s + numericKg(set.kg) * (set.value ?? 0), 0), 0);
-      const response = await fetch("/api/save-workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      const payload: SaveWorkoutPayload = {
         date, workoutType, variant,
         bodyweightKg: bodyweight ? Number(bodyweight) : null,
         durationMin: duration ? Number(duration) : null,
@@ -128,10 +140,30 @@ function WorkoutContent() {
         sleepHours: sleep ? Number(sleep) : null,
         notes: sessionNotes,
         exercises: items.map((item, index) => ({ order: index + 1, slotName: item.slotName, exerciseId: item.exercise.exerciseId, exerciseName: item.exercise.exerciseName, sets: item.sets, rpe: item.rpe ? Number(item.rpe) : null, notes: item.notes })),
-      }) });
-      const json = await response.json();
-      if (!response.ok) throw new Error(json.error || "Unable to save workout");
-      setSummary({ sessionId: json.sessionId, totalSets, totalVolume, prs });
+      };
+
+      if (!navigator.onLine) {
+        const queued = queueWorkout(payload);
+        setQueuedOffline(true);
+        setSummary({ sessionId: `Offline ${queued.id.slice(0, 6)}`, totalSets, totalVolume, prs });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/save-workout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const json = await response.json();
+        if (!response.ok) throw new Error(json.error || "Unable to save workout");
+        setSummary({ sessionId: json.sessionId, totalSets, totalVolume, prs });
+      } catch (networkError) {
+        if (!navigator.onLine || networkError instanceof TypeError) {
+          const queued = queueWorkout(payload);
+          setQueuedOffline(true);
+          setSummary({ sessionId: `Offline ${queued.id.slice(0, 6)}`, totalSets, totalVolume, prs });
+        } else {
+          throw networkError;
+        }
+      }
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to save workout"); }
     finally { setSaving(false); }
@@ -143,9 +175,11 @@ function WorkoutContent() {
   return <main className="shell workout-shell">
     <header className="workout-header"><div><p className="eyebrow">TODAY'S WORKOUT</p><h1>{workoutType} {variant}</h1></div><a href="/" className="ghost-link">Change</a></header>
 
+    {offlineLoaded && <div className="status-card offline-note">Offline copy loaded. Any completed workout will sync when your phone reconnects.</div>}
     {summary && <section className="summary-card">
-      <p className="eyebrow">SESSION {summary.sessionId} SAVED</p><h2>{workoutType} {variant} complete</h2>
+      <p className="eyebrow">{queuedOffline ? "SAVED ON PHONE" : `SESSION ${summary.sessionId} SAVED`}</p><h2>{workoutType} {variant} complete</h2>
       <div className="summary-stats"><div><strong>{duration || "—"}</strong><span>minutes</span></div><div><strong>{calories || "—"}</strong><span>kcal</span></div><div><strong>{summary.totalSets}</strong><span>sets</span></div><div><strong>{Math.round(summary.totalVolume).toLocaleString()}</strong><span>volume kg</span></div></div>
+      {queuedOffline && <p className="offline-summary">Your workout is safe and waiting to sync to Google Sheets.</p>}
       {summary.prs.length > 0 && <p className="pr-line">🏆 New best: {summary.prs.join(", ")}</p>}
     </section>}
     {error && <div className="status-card error">{error}</div>}
