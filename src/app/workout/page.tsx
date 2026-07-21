@@ -8,8 +8,16 @@ import { cacheWorkout, getCachedWorkout, queueWorkout } from "@/lib/offline";
 type EditableExercise = WorkoutExercise & { sets: SetPerformance[]; rpe: string; notes: string };
 type Summary = { sessionId: string; totalSets: number; totalVolume: number; prs: string[] };
 
-function emptySets(count: number): SetPerformance[] {
-  return Array.from({ length: count }, () => ({ kg: "", value: null }));
+function isBodyweightExercise(exercise: Exercise): boolean {
+  return exercise.equipment === "Bodyweight" || exercise.equipment === "Pull-up Bar";
+}
+
+function emptySets(count: number, bodyweight = false): SetPerformance[] {
+  return Array.from({ length: count }, () => ({ kg: bodyweight ? "0" : "", value: null }));
+}
+
+function normalizeSets(sets: SetPerformance[], exercise: Exercise): SetPerformance[] {
+  return sets.map((set) => ({ ...set, kg: set.kg || (isBodyweightExercise(exercise) ? "0" : "") }));
 }
 
 function numericKg(value: string): number {
@@ -43,6 +51,7 @@ function WorkoutContent() {
   const [replaceIndex, setReplaceIndex] = useState<number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [rest, setRest] = useState(0);
+  const [restDuration, setRestDuration] = useState("90");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [bodyweight, setBodyweight] = useState("");
   const [duration, setDuration] = useState("");
@@ -72,13 +81,13 @@ function WorkoutContent() {
         cacheWorkout(workoutType, variant, json);
         setData(json);
         setOfflineLoaded(false);
-        setItems(json.exercises.map((item: WorkoutExercise) => ({ ...item, sets: item.target.map((set) => ({ ...set })), rpe: "", notes: "" })));
+        setItems(json.exercises.map((item: WorkoutExercise) => ({ ...item, sets: normalizeSets(item.target.map((set) => ({ ...set })), item.exercise), rpe: "", notes: "" })));
       } catch (err) {
         const cached = getCachedWorkout(workoutType, variant);
         if (cached) {
           setData(cached);
           setOfflineLoaded(true);
-          setItems(cached.exercises.map((item: WorkoutExercise) => ({ ...item, sets: item.target.map((set) => ({ ...set })), rpe: "", notes: "" })));
+          setItems(cached.exercises.map((item: WorkoutExercise) => ({ ...item, sets: normalizeSets(item.target.map((set) => ({ ...set })), item.exercise), rpe: "", notes: "" })));
         } else {
           setError(err instanceof Error ? `${err.message}. Open this workout once while online to make it available offline.` : "Unable to load workout");
         }
@@ -103,16 +112,34 @@ function WorkoutContent() {
 
   function applyExercise(index: number, replacement: Exercise) {
     const snapshot = data?.exerciseSnapshots?.[replacement.exerciseId];
-    const target = snapshot?.target?.length ? snapshot.target : emptySets(replacement.defaultSets);
+    const target = snapshot?.target?.length ? normalizeSets(snapshot.target, replacement) : emptySets(replacement.defaultSets, isBodyweightExercise(replacement));
     setItems((current) => current.map((item, i) => i === index ? { ...item, group: replacement.group, slotName: item.slotName, exercise: replacement, last: snapshot?.last ?? null, target, sets: target.map((s) => ({ ...s })), notes: "Replacement exercise" } : item));
     setReplaceIndex(null);
   }
 
   function addExercise(exercise: Exercise) {
     const snapshot = data?.exerciseSnapshots?.[exercise.exerciseId];
-    const target = snapshot?.target?.length ? snapshot.target : emptySets(exercise.defaultSets);
+    const target = snapshot?.target?.length ? normalizeSets(snapshot.target, exercise) : emptySets(exercise.defaultSets, isBodyweightExercise(exercise));
     setItems((current) => [...current, { order: current.length + 1, slotName: exercise.group, group: exercise.group, exercise, last: snapshot?.last ?? null, target, sets: target.map((s) => ({ ...s })), rpe: "", notes: "Added to today's workout" }]);
     setAddOpen(false);
+  }
+
+  function addSet(index: number) {
+    setItems((current) => current.map((item, i) => i !== index || item.sets.length >= 4 ? item : {
+      ...item,
+      sets: [...item.sets, { kg: isBodyweightExercise(item.exercise) ? "0" : (item.sets.at(-1)?.kg || ""), value: null }],
+    }));
+  }
+
+  function removeSet(index: number) {
+    setItems((current) => current.map((item, i) => {
+      if (i !== index || item.sets.length <= 1) return item;
+      const last = item.sets.at(-1);
+      if ((last?.kg && last.kg !== "0") || last?.value !== null) {
+        if (!window.confirm("Remove the final set and its entered data?")) return item;
+      }
+      return { ...item, sets: item.sets.slice(0, -1) };
+    }));
   }
 
   function removeExercise(index: number) { setItems((c) => c.filter((_, i) => i !== index).map((x, i) => ({ ...x, order: i + 1 }))); }
@@ -130,7 +157,12 @@ function WorkoutContent() {
         return nowBest > lastBest;
       }).map((x) => x.exercise.exerciseName);
       const totalSets = items.reduce((sum, x) => sum + x.sets.filter((s) => s.kg || s.value !== null).length, 0);
-      const totalVolume = items.reduce((sum, x) => sum + x.sets.reduce((s, set) => s + numericKg(set.kg) * (set.value ?? 0), 0), 0);
+      const sessionBodyweight = bodyweight ? Number(bodyweight) : 0;
+      const totalVolume = items.reduce((sum, x) => sum + x.sets.reduce((setSum, set) => {
+        const externalLoad = numericKg(set.kg);
+        const effectiveLoad = isBodyweightExercise(x.exercise) ? sessionBodyweight + externalLoad : externalLoad;
+        return setSum + effectiveLoad * (set.value ?? 0);
+      }, 0), 0);
       const payload: SaveWorkoutPayload = {
         date, workoutType, variant,
         bodyweightKg: bodyweight ? Number(bodyweight) : null,
@@ -202,8 +234,9 @@ function WorkoutContent() {
           <div className={`progression-badge ${badge.toLowerCase().replace(" ", "-")}`}>{badge}</div>
           {item.last ? <div className="last-performance"><strong>Previous</strong>{item.last.sets.filter((s) => s.kg || s.value !== null).map((s, i) => <span key={i}>{s.kg || "—"} × {s.value ?? "—"}</span>)}</div> : <div className="last-performance new">No previous data</div>}
           <div className="sets-header"><span>Set</span><span>KG</span><span>{unit}</span></div>
-          <div className="sets-grid">{item.sets.map((set, setIndex) => <div className="set-row" key={setIndex}><strong>{setIndex + 1}</strong><input inputMode="decimal" value={set.kg} onChange={(e) => updateSet(index, setIndex, "kg", e.target.value)} placeholder={item.exercise.equipment === "Bodyweight" || item.exercise.equipment === "Pull-up Bar" ? "BW" : "kg"}/><input inputMode="numeric" value={set.value ?? ""} onChange={(e) => updateSet(index, setIndex, "value", e.target.value)} placeholder={unit.toLowerCase()}/></div>)}</div>
-          <div className="quick-actions"><button onClick={() => setRest(90)}>90s rest</button><button onClick={() => setRest(120)}>2m rest</button><button onClick={() => setReplaceIndex(index)}>Replace</button></div>
+          <div className="sets-grid">{item.sets.map((set, setIndex) => <div className="set-row" key={setIndex}><strong>{setIndex + 1}</strong><div className="weight-input-wrap"><input inputMode="decimal" value={set.kg} onChange={(e) => updateSet(index, setIndex, "kg", e.target.value)} placeholder="kg"/>{isBodyweightExercise(item.exercise) && numericKg(set.kg) === 0 && <span>BW</span>}</div><input inputMode="numeric" value={set.value ?? ""} onChange={(e) => updateSet(index, setIndex, "value", e.target.value)} placeholder={unit.toLowerCase()}/></div>)}</div>
+          <div className="set-count-actions"><button disabled={item.sets.length <= 1} onClick={() => removeSet(index)}>− Set</button><span>{item.sets.length} set{item.sets.length === 1 ? "" : "s"}</span><button disabled={item.sets.length >= 4} onClick={() => addSet(index)}>+ Set</button></div>
+          <div className="quick-actions timer-actions"><label><span>Rest seconds</span><input inputMode="numeric" min="1" max="600" value={restDuration} onChange={(e) => setRestDuration(e.target.value)} /></label><button onClick={() => setRest(Math.max(1, Number(restDuration) || 90))}>Start rest</button><button onClick={() => setReplaceIndex(index)}>Replace</button></div>
           <details><summary>RPE & notes</summary><div className="exercise-meta"><label>RPE<input inputMode="decimal" value={item.rpe} onChange={(e) => setItems((c) => c.map((x, i) => i === index ? { ...x, rpe: e.target.value } : x))} placeholder="Optional" /></label><label>Notes<input value={item.notes} onChange={(e) => setItems((c) => c.map((x, i) => i === index ? { ...x, notes: e.target.value } : x))} placeholder="Optional" /></label></div></details>
         </article>;
       })}
