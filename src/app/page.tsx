@@ -42,7 +42,7 @@ export default function HomePage() {
           Build {type} {variant}
         </button>
       </section>
-      <div className="home-links"><a href="/settings">Settings</a></div>
+      <div className="home-actions"><a className="secondary" href="/cardio">Log cardio</a><a className="secondary" href="/settings">Settings</a></div>
     </main>
   );
 }
