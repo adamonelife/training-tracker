@@ -1,9 +1,10 @@
-const CACHE_VERSION = "training-tracker-v1";
+const CACHE_VERSION = "training-tracker-v2";
 const APP_CACHE = `${CACHE_VERSION}-app`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 const APP_SHELL = [
   "/",
   "/settings",
+  "/cardio",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
@@ -59,7 +60,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  if (request.mode === "navigate" || url.pathname.startsWith("/api/workouts")) {
+  if (request.mode === "navigate" || (url.pathname.startsWith("/api/workouts") || url.pathname.startsWith("/api/cardio"))) {
     event.respondWith(networkFirst(request));
     return;
   }
