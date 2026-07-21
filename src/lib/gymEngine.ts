@@ -10,10 +10,15 @@ export function latestForExercise(logs: LoggedExercise[], exerciseId: string): L
   })[0];
 }
 
-function activeSets(last: LoggedExercise | null, defaultSets: number): SetPerformance[] {
-  if (!last) return Array.from({ length: defaultSets }, () => ({ kg: "", value: null }));
+function isBodyweightExercise(exercise: Exercise): boolean {
+  return exercise.equipment === "Bodyweight" || exercise.equipment === "Pull-up Bar";
+}
+
+function activeSets(last: LoggedExercise | null, exercise: Exercise): SetPerformance[] {
+  const defaultKg = isBodyweightExercise(exercise) ? "0" : "";
+  if (!last) return Array.from({ length: exercise.defaultSets }, () => ({ kg: defaultKg, value: null }));
   const nonEmpty = last.sets.filter((set) => set.kg || set.value !== null);
-  return nonEmpty.length ? nonEmpty : Array.from({ length: defaultSets }, () => ({ kg: "", value: null }));
+  return nonEmpty.length ? nonEmpty.map((set) => ({ ...set, kg: set.kg || (isBodyweightExercise(exercise) ? "0" : "") })) : Array.from({ length: exercise.defaultSets }, () => ({ kg: defaultKg, value: null }));
 }
 
 function increaseWeakest(values: number[], max: number): number[] {
@@ -27,7 +32,7 @@ function increaseWeakest(values: number[], max: number): number[] {
 }
 
 export function calculateTarget(exercise: Exercise, last: LoggedExercise | null): SetPerformance[] {
-  const prior = activeSets(last, exercise.defaultSets);
+  const prior = activeSets(last, exercise);
   if (!last) return prior;
   if (exercise.progressionType === "Fixed") return prior;
 
