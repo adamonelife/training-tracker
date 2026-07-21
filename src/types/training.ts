@@ -81,3 +81,14 @@ export interface SaveWorkoutPayload {
     notes?: string;
   }>;
 }
+
+export interface CardioEntry {
+  cardioId?: string;
+  date: string;
+  activity: string;
+  durationMin: number;
+  watchCalories: number;
+  distanceKm?: number | null;
+  averageHr?: number | null;
+  notes?: string;
+}
